@@ -3,6 +3,11 @@ using UnityEngine.Rendering;
 using UnityEngine.Rendering.HighDefinition;
 using UnityEditor.ShortcutManagement;
 using static UnityEditorInternal.EditMode;
+using UnityEditor.IMGUI.Controls;
+using System;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Collections.Generic;
 
 namespace UnityEditor.Rendering.HighDefinition
 {
@@ -21,6 +26,7 @@ namespace UnityEditor.Rendering.HighDefinition
         SerializedProperty m_AffectsTransparencyProperty;
         SerializedProperty m_Size;
         SerializedProperty[] m_SizeValues;
+        SerializedProperty m_Offset;
         SerializedProperty m_OffsetZ;
         SerializedProperty m_FadeFactor;
         SerializedProperty m_DecalLayerMask;
@@ -78,21 +84,24 @@ namespace UnityEditor.Rendering.HighDefinition
                 return s_Handle;
             }
         }
+        
+        static readonly BoxBoundsHandle s_AreaLightHandle =
+            new BoxBoundsHandle { axes = PrimitiveBoundsHandle.Axes.X | PrimitiveBoundsHandle.Axes.Y };
 
         const SceneViewEditMode k_EditShapeWithoutPreservingUV = (SceneViewEditMode)90;
         const SceneViewEditMode k_EditShapePreservingUV = (SceneViewEditMode)91;
-        const SceneViewEditMode k_EditUV = (SceneViewEditMode)92;
+        const SceneViewEditMode k_EditUVAndPivot = (SceneViewEditMode)92;
         static readonly SceneViewEditMode[] k_EditVolumeModes = new SceneViewEditMode[]
         {
             k_EditShapeWithoutPreservingUV,
             k_EditShapePreservingUV
         };
-        static readonly SceneViewEditMode[] k_EditPivotModes = new SceneViewEditMode[]
+        static readonly SceneViewEditMode[] k_EditUVAndPivotModes = new SceneViewEditMode[]
         {
-            k_EditUV
+            k_EditUVAndPivot
         };
-        static SceneViewEditMode s_CurrentEditMode;
-        static bool s_ModeSwitched;
+
+        static Func<Vector3, Quaternion, Vector3> s_DrawPivotHandle;
 
         static GUIContent[] k_EditVolumeLabels = null;
         static GUIContent[] editVolumeLabels => k_EditVolumeLabels ?? (k_EditVolumeLabels = new GUIContent[]
@@ -106,11 +115,52 @@ namespace UnityEditor.Rendering.HighDefinition
             EditorGUIUtility.TrIconContent("d_MoveTool", k_EditUVTooltip)
         });
 
-        static Editor s_Owner;
+        static List<DecalProjectorEditor> s_Instances = new List<DecalProjectorEditor>();
+
+        static DecalProjectorEditor FindEditorFromSelection()
+        {
+            GameObject[] selection = Selection.gameObjects;
+            DecalProjector[] selectionTargets = Selection.GetFiltered<DecalProjector>(SelectionMode.Unfiltered);
+
+            foreach (DecalProjectorEditor editor in s_Instances)
+            {
+                Debug.Log("Check Start");
+                if (selectionTargets.Length != editor.targets.Length)
+                {
+                    Debug.Log("Length missmatch");
+                    continue;
+                }
+                bool allOk = true;
+                foreach (DecalProjector selectionTarget in selectionTargets)
+                    if (!Array.Find(editor.targets, t => t == selectionTarget))
+                    {
+                        Debug.Log("Missing " + selectionTarget);
+                        allOk = false;
+                        break;
+                    }
+                if (!allOk)
+                    continue;
+                Debug.Log("All good");
+                return editor;
+            }
+            return null;
+        }
+
+        static DecalProjectorEditor()
+        {
+            Type TransformHandleIdsType = Type.GetType("UnityEditor.Handles.TransformHandleIds, UnityEditor");
+            var transformTranslationXHash = Expression.Variable(typeof(int), "TransformTranslationXHash");
+            var transformTranslationYHash = Expression.Variable(typeof(int), "TransformTranslationYHash");
+            var transformTranslationXYHash = Expression.Variable(typeof(int), "TransformTranslationXYHash");
+            Type transformHandleParamType = Type.GetType("UnityEditor.Handles.TransformHandleParam, UnityEditor");
+            //var transformHandleParam = Expression.Variable(transformHandleParamType, "TransformHandleParam");
+
+        }
+
 
         private void OnEnable()
         {
-            s_Owner = this;
+            s_Instances.Add(this);
 
             // Create an instance of the MaterialEditor
             UpdateMaterialEditor();
@@ -135,7 +185,8 @@ namespace UnityEditor.Rendering.HighDefinition
                 m_Size.FindPropertyRelative("y"),
                 m_Size.FindPropertyRelative("z"),
             };
-            m_OffsetZ = serializedObject.FindProperty("m_Offset").FindPropertyRelative("z");
+            m_Offset = serializedObject.FindProperty("m_Offset");
+            m_OffsetZ = m_Offset.FindPropertyRelative("z");
             m_FadeFactor = serializedObject.FindProperty("m_FadeFactor");
             m_DecalLayerMask = serializedObject.FindProperty("m_DecalLayerMask");
         }
@@ -147,7 +198,8 @@ namespace UnityEditor.Rendering.HighDefinition
                 if (decalProjector != null)
                     decalProjector.OnMaterialChange -= RequireUpdateMaterialEditor;
             }
-            s_Owner = null;
+
+            s_Instances.Remove(this);
         }
 
         private void OnDestroy() =>
@@ -199,7 +251,6 @@ namespace UnityEditor.Rendering.HighDefinition
 
         void DrawHandles()
         {
-            //Note: each target need to be handled individually to allow multi edition
             DecalProjector decalProjector = target as DecalProjector;
 
             if (editMode == k_EditShapePreservingUV || editMode == k_EditShapeWithoutPreservingUV)
@@ -208,7 +259,11 @@ namespace UnityEditor.Rendering.HighDefinition
                 {
                     bool needToRefreshDecalProjector = false;
 
-                    handle.center = decalProjector.offset;
+                    Vector3 centerStart = new Vector3(
+                        -decalProjector.offset.x,
+                        -decalProjector.offset.y,
+                        decalProjector.size.z * .5f - decalProjector.offset.z);
+                    handle.center = centerStart;
                     handle.size = decalProjector.size;
 
                     Vector3 boundsSizePreviousOS = handle.size;
@@ -221,10 +276,11 @@ namespace UnityEditor.Rendering.HighDefinition
                         needToRefreshDecalProjector = true;
 
                         // Adjust decal transform if handle changed.
-                        Undo.RecordObject(decalProjector, "Decal Projector Change");
+                        Undo.RecordObjects(new UnityEngine.Object[] { decalProjector, decalProjector.transform }, "Decal Projector Change");
 
                         decalProjector.size = handle.size;
-                        decalProjector.offset = handle.center;
+                        //decalProjector.offset = handle.center;
+                        decalProjector.transform.position += decalProjector.transform.rotation * (handle.center - centerStart);
 
                         Vector3 boundsSizeCurrentOS = handle.size;
                         Vector3 boundsMinCurrentOS = handle.size * -0.5f + handle.center;
@@ -252,25 +308,25 @@ namespace UnityEditor.Rendering.HighDefinition
 
                     // Automatically recenter our transform component if necessary.
                     // In order to correctly handle world-space snapping, we only perform this recentering when the user is no longer interacting with the gizmo.
-                    if ((GUIUtility.hotControl == 0) && (decalProjector.offset != Vector3.zero))
-                    {
-                        needToRefreshDecalProjector = true;
+                    //if (GUIUtility.hotControl == 0 && decalProjector.offset != Vector3.zero)
+                    //{
+                    //    needToRefreshDecalProjector = true;
 
-                        // Both the DecalProjectorComponent, and the transform will be modified.
-                        // The undo system will automatically group all RecordObject() calls here into a single action.
-                        Undo.RecordObject(decalProjector.transform, "Decal Projector Change");
+                    //    // Both the DecalProjectorComponent, and the transform will be modified.
+                    //    // The undo system will automatically group all RecordObject() calls here into a single action.
+                    //    Undo.RecordObject(decalProjector.transform, "Decal Projector Change");
 
-                        // Re-center the transform to the center of the decal projector bounds,
-                        // while maintaining the world-space coordinates of the decal projector boundings vertices.
-                        // Center of the decal projector is not the same of the HierarchicalBox as we want it to be on the z face as lights
-                        decalProjector.transform.Translate(decalProjector.offset + new Vector3(0f, 0f, handle.size.z * -0.5f), Space.Self);
+                    //    // Re-center the transform to the center of the decal projector bounds,
+                    //    // while maintaining the world-space coordinates of the decal projector boundings vertices.
+                    //    // Center of the decal projector is not the same of the HierarchicalBox as we want it to be on the z face as lights
+                    //    decalProjector.transform.Translate(decalProjector.offset + new Vector3(0f, 0f, handle.size.z * -0.5f), Space.Self);
 
-                        decalProjector.offset = new Vector3(0f, 0f, handle.size.z * 0.5f);
-                        if (PrefabUtility.IsPartOfNonAssetPrefabInstance(decalProjector))
-                        {
-                            PrefabUtility.RecordPrefabInstancePropertyModifications(decalProjector);
-                        }
-                    }
+                    //    decalProjector.offset = new Vector3(0f, 0f, handle.size.z * 0.5f);
+                    //    if (PrefabUtility.IsPartOfNonAssetPrefabInstance(decalProjector))
+                    //    {
+                    //        PrefabUtility.RecordPrefabInstancePropertyModifications(decalProjector);
+                    //    }
+                    //}
 
                     if (needToRefreshDecalProjector)
                     {
@@ -280,78 +336,536 @@ namespace UnityEditor.Rendering.HighDefinition
                 }
             }
 
-            //[TODO: add editable pivot. Uncomment this when ready]
-            //else if (editMode == k_EditUV)
-            //{
-            //    //here should be handles code to manipulate the pivot without changing the UV
-            //}
-        }
-
-        [DrawGizmo(GizmoType.Selected | GizmoType.Active)]
-        static void DrawGizmosSelected(DecalProjector decalProjector, GizmoType gizmoType)
-        {
-            //draw them scale independent
-            using (new Handles.DrawingScope(Color.white, Matrix4x4.TRS(decalProjector.transform.position, decalProjector.transform.rotation, Vector3.one)))
+            else if (editMode == k_EditUVAndPivot)
             {
-                handle.center = decalProjector.offset;
-                handle.size = decalProjector.size;
-                bool inEditMode = editMode == k_EditShapePreservingUV || editMode == k_EditShapeWithoutPreservingUV;
-                handle.DrawHull(inEditMode);
-
-                Quaternion arrowRotation = Quaternion.LookRotation(Vector3.down, Vector3.right);
-                float arrowSize = decalProjector.size.z * 0.25f;
-                Vector3 pivot = decalProjector.offset;
-                Vector3 projectedPivot = pivot + decalProjector.size.z * 0.5f * Vector3.back;
-                Handles.ArrowHandleCap(0, projectedPivot, Quaternion.identity, arrowSize, EventType.Repaint);
-
-                //[TODO: add editable pivot. Uncomment this when ready]
-                //draw pivot
-                //Handles.SphereHandleCap(controlID, pivot, Quaternion.identity, 0.02f, EventType.Repaint);
-                //Color c = Color.white;
-                //c.a = 0.2f;
-                //Handles.color = c;
-                //Handles.DrawLine(projectedPivot, projectedPivot + decalProjector.m_Size.x * 0.5f * Vector3.right);
-                //Handles.DrawLine(projectedPivot, projectedPivot + decalProjector.m_Size.y * 0.5f * Vector3.up);
-                //Handles.DrawLine(projectedPivot, projectedPivot + decalProjector.m_Size.z * 0.5f * Vector3.forward);
-
-                //draw UV and bolder edges
-                using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * (decalProjector.size * 0.5f + decalProjector.offset.z * Vector3.back), decalProjector.transform.rotation, Vector3.one)))
+                // Pivot
+                using (new Handles.DrawingScope(Color.white, Matrix4x4.TRS(Vector3.zero, decalProjector.transform.rotation, Vector3.one)))
                 {
-                    if (inEditMode)
-                    {
-                        Vector2 size = new Vector2(
-                            (decalProjector.uvScale.x > 100000 || decalProjector.uvScale.x < -100000 ? 0f : 1f / decalProjector.uvScale.x) * decalProjector.size.x,
-                            (decalProjector.uvScale.y > 100000 || decalProjector.uvScale.y < -100000 ? 0f : 1f / decalProjector.uvScale.y) * decalProjector.size.y
-                        );
-                        Vector2 start = (Vector2)projectedPivot - new Vector2(decalProjector.uvBias.x * size.x, decalProjector.uvBias.y * size.y);
-                        Handles.DrawDottedLines(
-                            new Vector3[]
-                            {
-                                start,                              start + new Vector2(size.x, 0),
-                                start + new Vector2(size.x, 0),     start + size,
-                                start + size,                       start + new Vector2(0, size.y),
-                                start + new Vector2(0, size.y),     start
-                            },
-                            5f);
-                    }
+                    var isHot = ids.Has(GUIUtility.hotControl);
+                    var planeSize = isHot ? paramXY.planeSize + paramXY.planeOffset : paramXY.planeSize;
+                    var planarSize = Mathf.Max(planeSize[0], planeSize[s_DoPositionHandle_Internal_NextIndex[0]]);
+                    Vector3 sliderRotatedWorldPos = Quaternion.Inverse(decalProjector.transform.rotation) * decalProjector.transform.position;
+                    Vector3 beforeManipulationRotatedWorldPos = sliderRotatedWorldPos;
+                    var size1D = HandleUtility.GetHandleSize(sliderRotatedWorldPos);
+                    var size2D = HandleUtility.GetHandleSize(sliderRotatedWorldPos - new Vector3(0, 0, decalProjector.offset.z)) * planarSize * .5f;
+                    Vector3 depthSlider = sliderRotatedWorldPos;
 
-                    Vector2 halfSize = decalProjector.size * .5f;
-                    Vector2 halfSize2 = new Vector2(halfSize.x, -halfSize.y);
-                    Vector2 center = (Vector2)projectedPivot + halfSize;
-                    Handles.DrawLine(center - halfSize,  center - halfSize2, 3f);
-                    Handles.DrawLine(center - halfSize2, center + halfSize, 3f);
-                    Handles.DrawLine(center + halfSize,  center + halfSize2, 3f);
-                    Handles.DrawLine(center + halfSize2, center - halfSize, 3f);
+                    EditorGUI.BeginChangeCheck();
+                    {
+                        // dot offset = transform position seen as a sphere
+                        EditorGUI.BeginChangeCheck();
+                        depthSlider = Handles.Slider(depthSlider, Vector3.forward, size1D * .1f, Handles.SphereHandleCap, -1);
+                        if (EditorGUI.EndChangeCheck())
+                            sliderRotatedWorldPos.z = depthSlider.z;
+
+                        // 2D slider: square xy-axis
+                        Vector3 sliderFaceProjected = sliderRotatedWorldPos - new Vector3(0, 0, decalProjector.offset.z);
+                        sliderFaceProjected.x += size2D;
+                        sliderFaceProjected.y += size2D;
+                        using (new Handles.DrawingScope(Handles.zAxisColor))
+                        {
+                            verts[0] = sliderFaceProjected + (Vector3.right + Vector3.up) * size2D;
+                            verts[1] = sliderFaceProjected + (-Vector3.right + Vector3.up) * size2D;
+                            verts[2] = sliderFaceProjected + (-Vector3.right - Vector3.up) * size2D;
+                            verts[3] = sliderFaceProjected + (Vector3.right - Vector3.up) * size2D;
+                            float faceOpacity = 0.8f;
+                            if (GUIUtility.hotControl == ids.xy)
+                                Handles.color = Handles.selectedColor;
+                            else if (IsHovering(ids.xy, Event.current))
+                                faceOpacity = 0.4f;
+                            else
+                                faceOpacity = 0.1f;
+                            Color faceColor = new Color(Handles.zAxisColor.r, Handles.zAxisColor.g, Handles.zAxisColor.b, Handles.zAxisColor.a * faceOpacity);
+                            Handles.DrawSolidRectangleWithOutline(verts, faceColor, Color.clear);
+                            EditorGUI.BeginChangeCheck();
+                            sliderFaceProjected = Handles.Slider2D(ids.xy, sliderFaceProjected, Vector3.forward, Vector3.right, Vector3.up, size2D, Handles.RectangleHandleCap, GridSnapping.active ? Vector2.zero : new Vector2(EditorSnapSettings.move[0], EditorSnapSettings.move[1]), false);
+                            if (EditorGUI.EndChangeCheck())
+                            {
+                                sliderRotatedWorldPos.x = sliderFaceProjected.x;
+                                sliderRotatedWorldPos.y = sliderFaceProjected.y;
+                            }
+                        }
+                        sliderFaceProjected.x -= size2D;
+                        sliderFaceProjected.y -= size2D;
+
+                        // 2D slider: x-axis
+                        EditorGUI.BeginChangeCheck();
+                        using (new Handles.DrawingScope(Handles.xAxisColor))
+                            sliderFaceProjected = Handles.Slider(sliderFaceProjected, Vector3.right);
+                        if (EditorGUI.EndChangeCheck())
+                            sliderRotatedWorldPos.x = sliderFaceProjected.x;
+
+                        // 2D slider: y-axis
+                        EditorGUI.BeginChangeCheck();
+                        using (new Handles.DrawingScope(Handles.yAxisColor))
+                            sliderFaceProjected = Handles.Slider(sliderFaceProjected, Vector3.up);
+                        if (EditorGUI.EndChangeCheck())
+                            sliderRotatedWorldPos.y = sliderFaceProjected.y;
+
+                        // depth: z-axis
+                        EditorGUI.BeginChangeCheck();
+                        using (new Handles.DrawingScope(Handles.zAxisColor))
+                            depthSlider = Handles.Slider(depthSlider, Vector3.forward);
+                        if (EditorGUI.EndChangeCheck())
+                            sliderRotatedWorldPos.z = depthSlider.z;
+                    }
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        Vector3 newPosition = decalProjector.transform.rotation * sliderRotatedWorldPos;
+                        decalProjector.transform.position = newPosition;
+                        decalProjector.offset += sliderRotatedWorldPos - beforeManipulationRotatedWorldPos;
+                    }
+                }
+
+                // UV
+                //using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position + decalProjector.transform.rotation * new Vector3(-decalProjector.offset.x, -decalProjector.offset.y, -decalProjector.offset.z), decalProjector.transform.rotation, Vector3.one)))
+                using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * (new Vector3(decalProjector.size.x * 0.5f, decalProjector.size.y * 0.5f, 0) + decalProjector.offset), decalProjector.transform.rotation, Vector3.one)))
+                {
+                    const float k_Limit = 100000;
+                    const float k_LimitInv = 1/k_Limit;
+                    Vector2 UVSize = new Vector2(
+                        decalProjector.uvScale.x > k_Limit || decalProjector.uvScale.x < -k_Limit ? 0f : decalProjector.size.x / decalProjector.uvScale.x,
+                        decalProjector.uvScale.y > k_Limit || decalProjector.uvScale.y < -k_Limit ? 0f : decalProjector.size.y / decalProjector.uvScale.y
+                        );
+                    Vector2 UVStart = -new Vector2(decalProjector.uvBias.x * UVSize.x, decalProjector.uvBias.y * UVSize.y);
+                    Vector2 UVCenter = UVStart + UVSize * 0.5f;
+                    EditorGUI.BeginChangeCheck();
+                    UVSize = Handles.DoRectHandles(Quaternion.identity, UVCenter /*decalProjector.uvBias*/, UVSize, handlesOnly: true);
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        Vector2 limit = new Vector2(Mathf.Abs(decalProjector.size.x * k_LimitInv), Mathf.Abs(decalProjector.size.y * k_LimitInv));
+                        Vector2 uvScale = decalProjector.uvScale;
+                        for (int channel = 0; channel < 2; channel++)
+                        {
+                            if (Mathf.Abs(UVSize[channel]) < limit[channel])
+                                uvScale[channel] = decalProjector.size[channel] / UVSize[channel];
+                            else
+                                uvScale[channel] = Mathf.Sign(decalProjector.size[channel]) * Mathf.Sign(UVSize[channel]) * k_Limit;
+                        }
+                        decalProjector.uvScale = uvScale;
+                    }
                 }
             }
         }
 
-        Bounds GetBoundsGetter()
+        static Handles.PositionHandleParam paramXY = new Handles.PositionHandleParam(
+            Handles.PositionHandleParam.Handle.X | Handles.PositionHandleParam.Handle.Y | Handles.PositionHandleParam.Handle.XY,
+            Vector3.zero, Vector3.one, Vector3.zero, Vector3.one * .25f,
+            Handles.PositionHandleParam.Orientation.Signed, Handles.PositionHandleParam.Orientation.Camera);
+
+        static Handles.PositionHandleParam paramZ = new Handles.PositionHandleParam(
+            Handles.PositionHandleParam.Handle.Z,
+            Vector3.zero, Vector3.one, Vector3.zero, Vector3.one * .25f,
+            Handles.PositionHandleParam.Orientation.Signed, Handles.PositionHandleParam.Orientation.Camera);
+
+        static Handles.PositionHandleIds ids = new Handles.PositionHandleIds(
+            "xAxisDecalPivot".GetHashCode(),
+            "yAxisDecalPivot".GetHashCode(),
+            "zAxisDecalPivot".GetHashCode(),
+            "xyAxisDecalPivot".GetHashCode(),
+            0, //unused: "xzAxisDecalPivot".GetHashCode(),
+            0, //unused: "yzAxisDecalPivot".GetHashCode(),
+            0  //unused: "FreeMoveDecalPivot".GetHashCode()
+        );
+
+        // If the user is currently mouse dragging then this value will be True
+        // and will disallow toggling Free Move mode on or off, or changing the octant of the planar handles.
+        static bool currentlyDragging { get { return EditorGUIUtility.hotControl != 0; } }
+
+        // While the user has Free Move mode turned on by holding 'shift' or 'V' (for Vertex Snapping),
+        // this variable will be set to True.
+        static bool s_FreeMoveMode = false;
+
+        static float[] s_DoPositionHandle_Internal_CameraViewLerp = new float[6];
+
+        static Vector3 DoPivotHandle(Vector3 position, Quaternion rotation)
         {
-            var bounds = new Bounds();
-            var decalTransform = ((Component)target).transform;
-            bounds.Encapsulate(decalTransform.position);
-            return bounds;
+            //EditorGUI.BeginChangeCheck();
+            //Vector3 res = Handles.DoPositionHandle_Internal(ids, (Vector2)position, Quaternion.identity, paramXY);
+            //Vector3 res2 = Handles.DoPositionHandle_Internal(ids, position, Quaternion.identity, paramZ);
+            //if (EditorGUI.EndChangeCheck())
+            //{
+            //    position.x = res.x;
+            //    position.y = res.y;
+            //    position.z = res2.z;
+            //}
+            //return position;
+
+            // Calculate the camera view vector in Handle draw space
+            // this handle the case where the matrix is skewed
+            var handlePosition = Handles.matrix.MultiplyPoint3x4(position);
+            var drawToWorldMatrix = Handles.matrix * Matrix4x4.TRS(position, rotation, Vector3.one);
+            var invDrawToWorldMatrix = drawToWorldMatrix.inverse;
+            var viewVectorDrawSpace = GetCameraViewFrom(handlePosition, invDrawToWorldMatrix);
+            
+            var size = HandleUtility.GetHandleSize(position);
+
+            // Calculate per axis camera lerp
+            for (var i = 0; i < 3; ++i)
+                s_DoPositionHandle_Internal_CameraViewLerp[i] = ids[i] == GUIUtility.hotControl ? 0 : GetCameraViewLerpForWorldAxis(viewVectorDrawSpace, s_AxisVector[i]);
+            // Calculate per plane camera lerp (xy, yz, xz)
+            for (var i = 0; i < 3; ++i)
+                s_DoPositionHandle_Internal_CameraViewLerp[3 + i] = Mathf.Max(s_DoPositionHandle_Internal_CameraViewLerp[i], s_DoPositionHandle_Internal_CameraViewLerp[(i + 1) % 3]);
+            
+            var isHot = ids.Has(GUIUtility.hotControl);
+            var planeOffset = paramXY.planeOffset;
+            if (isHot)
+            {
+                //axisOffset = Vector3.zero;
+                planeOffset = Vector3.zero;
+            }
+
+            var planeSize = isHot ? paramXY.planeSize + paramXY.planeOffset : paramXY.planeSize;
+
+            int i_xy = 0;
+            if (paramXY.ShouldShow(3 + i_xy) && (!isHot || ids[3 + i_xy] == GUIUtility.hotControl))
+            {
+                var cameraLerp = isHot ? 0 : s_DoPositionHandle_Internal_CameraViewLerp[3 + i_xy];
+                if (cameraLerp <= kCameraViewThreshold)
+                {
+                    var offset = planeOffset * size;
+                    offset[s_DoPositionHandle_Internal_PrevIndex[i_xy]] = 0;
+                    var planarSize = Mathf.Max(planeSize[i_xy], planeSize[s_DoPositionHandle_Internal_NextIndex[i_xy]]);
+                    position = DoPlanarHandle(ids[3 + i_xy], i_xy, position, offset, rotation, size * planarSize, cameraLerp, viewVectorDrawSpace, paramXY.planeOrientation);
+                }
+            }
+
+            //Handles.Slider(ids[i], position, offset, dir, size * param.axisSize[i], DoPositionHandle_ArrowCap, GridSnapping.active ? 0f : EditorSnapSettings.move[i]);
+
+            return position;
+        }
+
+        // When axis is looking away from camera, fade it out along 25 -> 15 degrees range
+        static readonly float kCameraViewLerpStart1 = Mathf.Cos(Mathf.Deg2Rad * 25.0f);
+        static readonly float kCameraViewLerpEnd1 = Mathf.Cos(Mathf.Deg2Rad * 15.0f);
+        // When axis is looking towards the camera, fade it out along 170 -> 175 degrees range
+        static readonly float kCameraViewLerpStart2 = Mathf.Cos(Mathf.Deg2Rad * 170.0f);
+        static readonly float kCameraViewLerpEnd2 = Mathf.Cos(Mathf.Deg2Rad * 175.0f);
+        // Hide & disable axis if they have faded out more than 60%
+        internal const float kCameraViewThreshold = 0.6f;
+
+
+        static int[] s_DoPositionHandle_Internal_NextIndex = { 1, 2, 0 };
+        static int[] s_DoPositionHandle_Internal_PrevIndex = { 2, 0, 1 };
+
+        static Vector3[] s_AxisVector = { Vector3.right, Vector3.up, Vector3.forward };
+
+        internal static float GetCameraViewLerpForWorldAxis(Vector3 viewVector, Vector3 axis)
+        {
+            var dot = Vector3.Dot(viewVector, axis);
+            var l1 = Mathf.InverseLerp(kCameraViewLerpStart1, kCameraViewLerpEnd1, dot);
+            var l2 = Mathf.InverseLerp(kCameraViewLerpStart2, kCameraViewLerpEnd2, dot);
+            return Mathf.Max(l1, l2);
+        }
+        
+        internal static Vector3 GetCameraViewFrom(Vector3 position, Matrix4x4 matrix)
+        {
+            Camera camera = Camera.current;
+            return camera.orthographic
+                ? matrix.MultiplyVector(camera.transform.forward).normalized
+                : matrix.MultiplyVector(position - camera.transform.position).normalized;
+        }
+
+        internal static Color GetFadedAxisColor(Color col, float fade, int id)
+        {
+            // never fade out axes that are being hover-highlighted or currently interacted with
+            if (id != 0 && id == GUIUtility.hotControl || id == HandleUtility.nearestControl)
+                fade = 0;
+            col = Color.Lerp(col, Color.clear, fade);
+            return col;
+        }
+
+        internal static bool IsHovering(int controlID, Event evt)
+        {
+            return controlID == HandleUtility.nearestControl && GUIUtility.hotControl == 0 && !Tools.viewToolActive;
+        }
+
+        internal static Color ToActiveColorSpace(Color color)
+        {
+            return (QualitySettings.activeColorSpace == ColorSpace.Linear) ? color.linear : color;
+        }
+
+        static Vector3 s_PlanarHandlesOctant = Vector3.one;
+        static Vector3[] verts = { Vector3.zero, Vector3.zero, Vector3.zero, Vector3.zero };
+
+        static Vector3 DoPlanarHandle(
+            int id,
+            int planePrimaryAxis,
+            Vector3 position,
+            Vector3 offset,
+            Quaternion rotation,
+            float handleSize,
+            float cameraLerp,
+            Vector3 viewVectorDrawSpace,
+            Handles.PositionHandleParam.Orientation orientation)
+        {
+            var positionOffset = offset;
+
+            var axis1index = planePrimaryAxis;
+            var axis2index = (axis1index + 1) % 3;
+            var axisNormalIndex = (axis1index + 2) % 3;
+
+            Color prevColor = Handles.color;
+
+            bool isDisabled = !GUI.enabled;
+            Color color = isDisabled ? new Color(.5f, .5f, .5f, 0f) : Handles.zAxisColor;
+            color = GetFadedAxisColor(color, cameraLerp, id);
+
+            float faceOpacity = 0.8f;
+            if (GUIUtility.hotControl == id)
+                color = Handles.selectedColor;
+            else if (IsHovering(id, Event.current))
+                faceOpacity = 0.4f;
+            else
+                faceOpacity = 0.1f;
+
+            color = ToActiveColorSpace(color);
+            Handles.color = color;
+
+
+            // NOTE: The planar transform handles always face toward the camera so they won't
+            // obscure each other (unlike the X, Y, and Z axis handles which always face in the
+            // positive axis directions). Whenever the octant that the camera is in (relative to
+            // to the transform tool) changes, we need to move the planar transform handle
+            // positions to the correct octant.
+
+            // Comments below assume axis1 is X and axis2 is Z to make it easier to visualize things.
+
+            // Shift the planar transform handle in the positive direction by half its
+            // handleSize so that it doesn't overlap in the center of the transform gizmo,
+            // and also move the handle origin into the octant that the camera is in.
+            // Don't update the actant while dragging to avoid too much distraction.
+            if (!currentlyDragging)
+            {
+                switch (orientation)
+                {
+                    case Handles.PositionHandleParam.Orientation.Camera:
+                        // Offset the X position of the handle in negative direction if camera is in the -X octants; otherwise positive.
+                        // Test against -0.01 instead of 0 to give a little bias to the positive quadrants. This looks better in axis views.
+                        s_PlanarHandlesOctant[axis1index] = (viewVectorDrawSpace[axis1index] > 0.01f ? -1 : 1);
+                        // Likewise with the other axis.
+                        s_PlanarHandlesOctant[axis2index] = (viewVectorDrawSpace[axis2index] > 0.01f ? -1 : 1);
+                        break;
+                    case Handles.PositionHandleParam.Orientation.Signed:
+                        s_PlanarHandlesOctant[axis1index] = 1;
+                        s_PlanarHandlesOctant[axis2index] = 1;
+                        break;
+                }
+            }
+            Vector3 handleOffset = s_PlanarHandlesOctant;
+            // Zero out the offset along the normal axis.
+            handleOffset[axisNormalIndex] = 0;
+            positionOffset = rotation * Vector3.Scale(positionOffset, handleOffset);
+            // Rotate and scale the offset
+            handleOffset = rotation * (handleOffset * handleSize * 0.5f);
+
+            // Calculate 3 axes
+            Vector3 axis1 = Vector3.zero;
+            Vector3 axis2 = Vector3.zero;
+            Vector3 axisNormal = Vector3.zero;
+            axis1[axis1index] = 1;
+            axis2[axis2index] = 1;
+            axisNormal[axisNormalIndex] = 1;
+            axis1 = rotation * axis1;
+            axis2 = rotation * axis2;
+            axisNormal = rotation * axisNormal;
+
+            // Draw the "filler" color for the handle
+            verts[0] = position + positionOffset + handleOffset + (axis1 + axis2) * handleSize * 0.5f;
+            verts[1] = position + positionOffset + handleOffset + (-axis1 + axis2) * handleSize * 0.5f;
+            verts[2] = position + positionOffset + handleOffset + (-axis1 - axis2) * handleSize * 0.5f;
+            verts[3] = position + positionOffset + handleOffset + (axis1 - axis2) * handleSize * 0.5f;
+            Color faceColor = new Color(color.r, color.g, color.b, color.a * faceOpacity);
+            Handles.DrawSolidRectangleWithOutline(verts, faceColor, Color.clear);
+
+            // And then render the handle itself (this is the colored outline)
+            position = Handles.Slider2D(id,
+                position,
+                handleOffset + positionOffset,
+                axisNormal,
+                axis1, axis2,
+                handleSize * 0.5f,
+                Handles.RectangleHandleCap,
+                GridSnapping.active ? Vector2.zero : new Vector2(EditorSnapSettings.move[axis1index], EditorSnapSettings.move[axis2index]),
+                false);
+
+            Handles.color = prevColor;
+
+            return position;
+        }
+
+        //static Vector3 DoPivotHandle(Vector3 position, Quaternion rotation)
+        //{
+        //    Event evt = Event.current;
+        //    switch (evt.type)
+        //    {
+        //        case EventType.KeyDown:
+        //            // Holding 'V' turns on the FreeMove transform gizmo and enables vertex snapping.
+        //            if (evt.keyCode == KeyCode.V && !currentlyDragging)
+        //            {
+        //                s_FreeMoveMode = true;
+        //            }
+        //            break;
+
+        //        case EventType.KeyUp:
+        //            // If the user has released the 'V' key, then rendering the transform gizmo
+        //            // one last time with Free Move mode off is technically incorrect since it can
+        //            // add one additional frame of input with FreeMove enabled, but the
+        //            // implementation is a fair bit simpler this way.
+        //            // Basic idea: Leave this call above the 'if' statement.
+        //            EditorGUI.BeginChangeCheck();
+        //            Vector3 res = Handles.DoPositionHandle_Internal(ids, (Vector2)position, Quaternion.identity, paramXY);
+        //            Vector3 res2 = Handles.DoPositionHandle_Internal(ids, position, Quaternion.identity, paramZ);
+        //            if (EditorGUI.EndChangeCheck())
+        //            {
+        //                position.x = res.x;
+        //                position.y = res.y;
+        //                position.z = res2.z;
+        //            }
+        //            if (evt.keyCode == KeyCode.V && !evt.shift && !currentlyDragging)
+        //            {
+        //                s_FreeMoveMode = false;
+        //            }
+        //            return position;
+
+        //        case EventType.Layout:
+        //            if (!currentlyDragging && !Tools.vertexDragging)
+        //            {
+        //                s_FreeMoveMode = evt.shift;
+        //            }
+        //            break;
+        //    }
+
+        //    if (s_FreeMoveMode)
+        //        position = Handles.DoPositionHandle_Internal(Handles.PositionHandleIds.@default, position, rotation, Handles.PositionHandleParam.DefaultFreeMoveHandle);
+        //    else
+        //    {
+        //        EditorGUI.BeginChangeCheck();
+        //        Vector3 res = Handles.DoPositionHandle_Internal(ids, (Vector2)position, Quaternion.identity, paramXY);
+        //        Vector3 res2 = Handles.DoPositionHandle_Internal(ids, position, Quaternion.identity, paramZ);
+        //        if (EditorGUI.EndChangeCheck())
+        //        {
+        //            position.x = res.x;
+        //            position.y = res.y;
+        //            position.z = res2.z;
+        //        }
+        //    }
+        //    return position;
+        //}
+
+        static DisplacableRectHandles m_UVHandles = new DisplacableRectHandles(Color.white);
+
+        [DrawGizmo(GizmoType.Selected | GizmoType.Active)]
+        static void DrawGizmosSelected(DecalProjector decalProjector, GizmoType gizmoType)
+        {
+            const float k_DotLength = 5f;
+
+            //draw them scale independent
+            using (new Handles.DrawingScope(Color.white, Matrix4x4.TRS(decalProjector.transform.position, decalProjector.transform.rotation, Vector3.one)))
+            {
+                //handle.center = Vector3.zero; //decalProjector.offset;
+                handle.center = new Vector3(
+                    -decalProjector.offset.x,
+                    -decalProjector.offset.y,
+                    decalProjector.size.z * .5f - decalProjector.offset.z);
+                handle.size = decalProjector.size;
+                bool isVolumeEditMode = editMode == k_EditShapePreservingUV || editMode == k_EditShapeWithoutPreservingUV;
+                bool isPivotEditMode = editMode == k_EditUVAndPivot;
+                handle.DrawHull(isVolumeEditMode);
+
+                //Vector3 projectedPivot = decalProjector.offset + decalProjector.offset.z * Vector3.back;
+                //projectedPivot.z = -decalProjector.offset.z;
+                Vector3 pivot = Vector3.zero;
+                Vector3 projectedPivot = new Vector3(0, 0, -decalProjector.offset.z);
+
+                if (isPivotEditMode)
+                {
+                    Handles.DrawDottedLines(new[] { projectedPivot, pivot }, k_DotLength);
+                }
+                else
+                {
+                    Quaternion arrowRotation = Quaternion.LookRotation(Vector3.down, Vector3.right);
+                    float arrowSize = decalProjector.size.z * 0.25f;
+                    Handles.ArrowHandleCap(0, projectedPivot, Quaternion.identity, arrowSize, EventType.Repaint);
+                }
+
+                //draw UV and bolder edges
+                //using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * (new Vector3(decalProjector.size.x * 0.5f, decalProjector.size.y * 0.5f, 0) + decalProjector.offset), decalProjector.transform.rotation, Vector3.one)))
+                //{
+                //    if (isPivotEditMode)
+                //    {
+                //        Vector2 UVSizeX = new Vector2(
+                //            (decalProjector.uvScale.x > 100000 || decalProjector.uvScale.x < -100000 ? 0f : 1f / decalProjector.uvScale.x) * decalProjector.size.x,
+                //            0
+                //            );
+                //        Vector2 UVSizeY = new Vector2(
+                //            0,
+                //            (decalProjector.uvScale.y > 100000 || decalProjector.uvScale.y < -100000 ? 0f : 1f / decalProjector.uvScale.y) * decalProjector.size.y
+                //            );
+                //        Vector2 UVStart = -new Vector2(decalProjector.uvBias.x * UVSizeX.x, decalProjector.uvBias.y * UVSizeY.y);
+                //        Handles.DrawDottedLines(
+                //            new Vector3[]
+                //            {
+                //                UVStart,                        UVStart + UVSizeX,
+                //                UVStart + UVSizeX,              UVStart + UVSizeX + UVSizeY,
+                //                UVStart + UVSizeX + UVSizeY,    UVStart + UVSizeY,
+                //                UVStart + UVSizeY,              UVStart
+                //            },
+                //            k_DotLength);
+                //    }
+
+                //    Vector2 size = decalProjector.size;
+                //    Vector2 halfSize = size * .5f;
+                //    Vector2 halfSize2 = new Vector2(halfSize.x, -halfSize.y);
+                //    Handles.DrawLine(Vector2.zero,          halfSize - halfSize2, 3f);
+                //    Handles.DrawLine(halfSize - halfSize2,  size, 3f);
+                //    Handles.DrawLine(size,                  halfSize + halfSize2, 3f);
+                //    Handles.DrawLine(halfSize + halfSize2,  Vector2.zero, 3f);
+                //}
+                using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * decalProjector.offset, decalProjector.transform.rotation, Vector3.one)))
+                {
+                    if (isPivotEditMode)
+                    {
+                        Vector2 UVSizeX = new Vector2(
+                            (decalProjector.uvScale.x > 100000 || decalProjector.uvScale.x < -100000 ? 0f : 1f / decalProjector.uvScale.x) * decalProjector.size.x,
+                            0
+                            );
+                        Vector2 UVSizeY = new Vector2(
+                            0,
+                            (decalProjector.uvScale.y > 100000 || decalProjector.uvScale.y < -100000 ? 0f : 1f / decalProjector.uvScale.y) * decalProjector.size.y
+                            );
+                        Vector2 UVStart = -new Vector2(decalProjector.uvBias.x * UVSizeX.x, decalProjector.uvBias.y * UVSizeY.y);
+                        Handles.DrawDottedLines(
+                            new Vector3[]
+                            {
+                                UVStart,                        UVStart + UVSizeX,
+                                UVStart + UVSizeX,              UVStart + UVSizeX + UVSizeY,
+                                UVStart + UVSizeX + UVSizeY,    UVStart + UVSizeY,
+                                UVStart + UVSizeY,              UVStart
+                            },
+                            k_DotLength);
+                    }
+
+                    Vector2 size = decalProjector.size;
+                    Vector2 halfSize = size * .5f;
+                    Vector2 halfSize2 = new Vector2(halfSize.x, -halfSize.y);
+                    Handles.DrawLine(Vector2.zero, halfSize - halfSize2, 3f);
+                    Handles.DrawLine(halfSize - halfSize2, size, 3f);
+                    Handles.DrawLine(size, halfSize + halfSize2, 3f);
+                    Handles.DrawLine(halfSize + halfSize2, Vector2.zero, 3f);
+                }
+            }
+        }
+        
+        static Func<Bounds> GetBoundsGetter(DecalProjector decalProjector)
+        {
+            return () =>
+            {
+                var bounds = new Bounds();
+                var decalTransform = decalProjector.transform;
+                bounds.Encapsulate(decalTransform.position);
+                return bounds;
+            };
         }
 
         public override void OnInspectorGUI()
@@ -368,10 +882,8 @@ namespace UnityEditor.Rendering.HighDefinition
             {
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.FlexibleSpace();
-                DoInspectorToolbar(k_EditVolumeModes, editVolumeLabels, GetBoundsGetter, this);
-
-                //[TODO: add editable pivot. Uncomment this when ready]
-                //DoInspectorToolbar(k_EditPivotModes, editPivotLabels, GetBoundsGetter, this);
+                DoInspectorToolbar(k_EditVolumeModes, editVolumeLabels, GetBoundsGetter(target as DecalProjector), this);
+                DoInspectorToolbar(k_EditUVAndPivotModes, editPivotLabels, GetBoundsGetter(target as DecalProjector), this);
                 GUILayout.FlexibleSpace();
                 EditorGUILayout.EndHorizontal();
 
@@ -449,6 +961,16 @@ namespace UnityEditor.Rendering.HighDefinition
                 }
                 else if (showAffectTransparency)
                     EditorGUILayout.PropertyField(m_AffectsTransparencyProperty, k_AffectTransparentContent);
+
+                EditorGUI.BeginChangeCheck();
+                Vector3 previousOffset = m_Offset.vector3Value;
+                EditorGUILayout.PropertyField(m_Offset);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    Undo.RecordObjects(targets.SelectMany(t => new[] { t, (t as DecalProjector).transform }).ToArray(), "Decal Projector Offset Change");
+                    foreach (DecalProjector projector in targets)
+                        projector.transform.position += projector.transform.rotation * (m_Offset.vector3Value - previousOffset);
+                }
             }
             if (EditorGUI.EndChangeCheck())
                 serializedObject.ApplyModifiedProperties();
@@ -498,35 +1020,48 @@ namespace UnityEditor.Rendering.HighDefinition
                 }
             }
         }
-
+        
         [Shortcut("HDRP/Decal: Handle changing size stretching UV", typeof(SceneView), KeyCode.Keypad1, ShortcutModifiers.Action)]
         static void EnterEditModeWithoutPreservingUV(ShortcutArguments args)
         {
             //If editor is not there, then the selected GameObject does not contains a DecalProjector
-            if (s_Owner == null || s_Owner.Equals(null))
+            DecalProjector activeDecalProjector = Selection.activeGameObject?.GetComponent<DecalProjector>();
+            if (activeDecalProjector == null || activeDecalProjector.Equals(null))
                 return;
 
-            ChangeEditMode(k_EditShapeWithoutPreservingUV, (s_Owner as DecalProjectorEditor).GetBoundsGetter(), s_Owner);
+            ChangeEditMode(k_EditShapeWithoutPreservingUV, GetBoundsGetter(activeDecalProjector)(), FindEditorFromSelection());
         }
 
         [Shortcut("HDRP/Decal: Handle changing size cropping UV", typeof(SceneView), KeyCode.Keypad2, ShortcutModifiers.Action)]
         static void EnterEditModePreservingUV(ShortcutArguments args)
         {
             //If editor is not there, then the selected GameObject does not contains a DecalProjector
-            if (s_Owner == null || s_Owner.Equals(null))
+            DecalProjector activeDecalProjector = Selection.activeGameObject?.GetComponent<DecalProjector>();
+            if (activeDecalProjector == null || activeDecalProjector.Equals(null))
                 return;
 
-            ChangeEditMode(k_EditShapePreservingUV, (s_Owner as DecalProjectorEditor).GetBoundsGetter(), s_Owner);
+            ChangeEditMode(k_EditShapePreservingUV, GetBoundsGetter(activeDecalProjector)(), FindEditorFromSelection());
         }
+        
+        [Shortcut("HDRP/Decal: Handle changing pivot position and UVs", typeof(SceneView), KeyCode.Keypad3, ShortcutModifiers.Action)]
+        static void EnterEditModePivotPreservingUV(ShortcutArguments args)
+        {
+            //If editor is not there, then the selected GameObject does not contains a DecalProjector
+            DecalProjector activeDecalProjector = Selection.activeGameObject?.GetComponent<DecalProjector>();
+            if (activeDecalProjector == null || activeDecalProjector.Equals(null))
+                return;
 
-        //[TODO: add editable pivot. Uncomment this when ready]
-        //[Shortcut("HDRP/Decal: Handle changing pivot position while preserving UV position", typeof(SceneView), KeyCode.Keypad3, ShortcutModifiers.Action)]
-        //static void EnterEditModePivotPreservingUV(ShortcutArguments args) =>
-        //    ChangeEditMode(k_EditUV, (s_Owner as DecalProjectorComponentEditor).GetBoundsGetter(), s_Owner);
+            ChangeEditMode(k_EditUVAndPivot, GetBoundsGetter(activeDecalProjector)(), FindEditorFromSelection());
+        }
 
         [Shortcut("HDRP/Decal: Handle swap between cropping and stretching UV", typeof(SceneView), KeyCode.W, ShortcutModifiers.Action)]
         static void SwappingEditUVMode(ShortcutArguments args)
         {
+            //If editor is not there, then the selected GameObject does not contains a DecalProjector
+            DecalProjector activeDecalProjector = Selection.activeGameObject?.GetComponent<DecalProjector>();
+            if (activeDecalProjector == null || activeDecalProjector.Equals(null))
+                return;
+
             SceneViewEditMode targetMode = SceneViewEditMode.None;
             switch (editMode)
             {
@@ -538,10 +1073,20 @@ namespace UnityEditor.Rendering.HighDefinition
                     break;
             }
             if (targetMode != SceneViewEditMode.None)
-                ChangeEditMode(targetMode, (s_Owner as DecalProjectorEditor).GetBoundsGetter(), s_Owner);
+                ChangeEditMode(targetMode, GetBoundsGetter(activeDecalProjector)(), FindEditorFromSelection());
         }
 
         [Shortcut("HDRP/Decal: Stop Editing", typeof(SceneView), KeyCode.Keypad0, ShortcutModifiers.Action)]
-        static void ExitEditMode(ShortcutArguments args) => QuitEditMode();
+        static void ExitEditMode(ShortcutArguments args)
+        {
+            //If editor is not there, then the selected GameObject does not contains a DecalProjector
+            DecalProjector activeDecalProjector = Selection.activeGameObject?.GetComponent<DecalProjector>();
+            if (activeDecalProjector == null || activeDecalProjector.Equals(null))
+                return;
+
+            QuitEditMode();
+        }
     }
 }
+
+
