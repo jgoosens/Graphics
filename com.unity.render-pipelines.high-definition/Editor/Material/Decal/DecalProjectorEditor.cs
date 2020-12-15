@@ -15,6 +15,9 @@ namespace UnityEditor.Rendering.HighDefinition
     [CanEditMultipleObjects]
     partial class DecalProjectorEditor : Editor
     {
+        const float k_Limit = 100000;
+        const float k_LimitInv = 1 / k_Limit;
+
         MaterialEditor m_MaterialEditor = null;
         SerializedProperty m_MaterialProperty;
         SerializedProperty m_DrawDistanceProperty;
@@ -71,20 +74,22 @@ namespace UnityEditor.Rendering.HighDefinition
             }
         }
 
-        static HierarchicalBox s_Handle;
-        static HierarchicalBox handle
+        static HierarchicalBox s_BoxHandle;
+        static HierarchicalBox boxHandle
         {
             get
             {
-                if (s_Handle == null || s_Handle.Equals(null))
+                if (s_BoxHandle == null || s_BoxHandle.Equals(null))
                 {
-                    s_Handle = new HierarchicalBox(k_GizmoColorBase, k_BaseHandlesColor);
-                    s_Handle.monoHandle = false;
+                    s_BoxHandle = new HierarchicalBox(k_GizmoColorBase, k_BaseHandlesColor);
+                    s_BoxHandle.monoHandle = false;
                 }
-                return s_Handle;
+                return s_BoxHandle;
             }
         }
-        
+
+        static DisplacableRectHandles m_UVHandles = new DisplacableRectHandles(Color.white);
+
         static readonly BoxBoundsHandle s_AreaLightHandle =
             new BoxBoundsHandle { axes = PrimitiveBoundsHandle.Axes.X | PrimitiveBoundsHandle.Axes.Y };
 
@@ -214,7 +219,7 @@ namespace UnityEditor.Rendering.HighDefinition
         {
             DecalProjector decalProjector = target as DecalProjector;
 
-            return new Bounds(decalProjector.transform.position, handle.size);
+            return new Bounds(decalProjector.transform.position, boxHandle.size);
         }
 
         private bool m_RequireUpdateMaterialEditor = false;
@@ -263,14 +268,14 @@ namespace UnityEditor.Rendering.HighDefinition
                         -decalProjector.offset.x,
                         -decalProjector.offset.y,
                         decalProjector.size.z * .5f - decalProjector.offset.z);
-                    handle.center = centerStart;
-                    handle.size = decalProjector.size;
+                    boxHandle.center = centerStart;
+                    boxHandle.size = decalProjector.size;
 
-                    Vector3 boundsSizePreviousOS = handle.size;
-                    Vector3 boundsMinPreviousOS = handle.size * -0.5f + handle.center;
+                    Vector3 boundsSizePreviousOS = boxHandle.size;
+                    Vector3 boundsMinPreviousOS = boxHandle.size * -0.5f + boxHandle.center;
 
                     EditorGUI.BeginChangeCheck();
-                    handle.DrawHandle();
+                    boxHandle.DrawHandle();
                     if (EditorGUI.EndChangeCheck())
                     {
                         needToRefreshDecalProjector = true;
@@ -278,12 +283,11 @@ namespace UnityEditor.Rendering.HighDefinition
                         // Adjust decal transform if handle changed.
                         Undo.RecordObjects(new UnityEngine.Object[] { decalProjector, decalProjector.transform }, "Decal Projector Change");
 
-                        decalProjector.size = handle.size;
-                        //decalProjector.offset = handle.center;
-                        decalProjector.transform.position += decalProjector.transform.rotation * (handle.center - centerStart);
+                        decalProjector.size = boxHandle.size;
+                        decalProjector.transform.position += decalProjector.transform.rotation * (boxHandle.center - centerStart);
 
-                        Vector3 boundsSizeCurrentOS = handle.size;
-                        Vector3 boundsMinCurrentOS = handle.size * -0.5f + handle.center;
+                        Vector3 boundsSizeCurrentOS = boxHandle.size;
+                        Vector3 boundsMinCurrentOS = boxHandle.size * -0.5f + boxHandle.center;
 
                         if (editMode == k_EditShapePreservingUV)
                         {
@@ -341,419 +345,72 @@ namespace UnityEditor.Rendering.HighDefinition
                 // Pivot
                 using (new Handles.DrawingScope(Color.white, Matrix4x4.TRS(Vector3.zero, decalProjector.transform.rotation, Vector3.one)))
                 {
-                    var isHot = ids.Has(GUIUtility.hotControl);
-                    var planeSize = isHot ? paramXY.planeSize + paramXY.planeOffset : paramXY.planeSize;
-                    var planarSize = Mathf.Max(planeSize[0], planeSize[s_DoPositionHandle_Internal_NextIndex[0]]);
-                    Vector3 sliderRotatedWorldPos = Quaternion.Inverse(decalProjector.transform.rotation) * decalProjector.transform.position;
-                    Vector3 beforeManipulationRotatedWorldPos = sliderRotatedWorldPos;
-                    var size1D = HandleUtility.GetHandleSize(sliderRotatedWorldPos);
-                    var size2D = HandleUtility.GetHandleSize(sliderRotatedWorldPos - new Vector3(0, 0, decalProjector.offset.z)) * planarSize * .5f;
-                    Vector3 depthSlider = sliderRotatedWorldPos;
-
                     EditorGUI.BeginChangeCheck();
-                    {
-                        // dot offset = transform position seen as a sphere
-                        EditorGUI.BeginChangeCheck();
-                        depthSlider = Handles.Slider(depthSlider, Vector3.forward, size1D * .1f, Handles.SphereHandleCap, -1);
-                        if (EditorGUI.EndChangeCheck())
-                            sliderRotatedWorldPos.z = depthSlider.z;
-
-                        // 2D slider: square xy-axis
-                        Vector3 sliderFaceProjected = sliderRotatedWorldPos - new Vector3(0, 0, decalProjector.offset.z);
-                        sliderFaceProjected.x += size2D;
-                        sliderFaceProjected.y += size2D;
-                        using (new Handles.DrawingScope(Handles.zAxisColor))
-                        {
-                            verts[0] = sliderFaceProjected + (Vector3.right + Vector3.up) * size2D;
-                            verts[1] = sliderFaceProjected + (-Vector3.right + Vector3.up) * size2D;
-                            verts[2] = sliderFaceProjected + (-Vector3.right - Vector3.up) * size2D;
-                            verts[3] = sliderFaceProjected + (Vector3.right - Vector3.up) * size2D;
-                            float faceOpacity = 0.8f;
-                            if (GUIUtility.hotControl == ids.xy)
-                                Handles.color = Handles.selectedColor;
-                            else if (IsHovering(ids.xy, Event.current))
-                                faceOpacity = 0.4f;
-                            else
-                                faceOpacity = 0.1f;
-                            Color faceColor = new Color(Handles.zAxisColor.r, Handles.zAxisColor.g, Handles.zAxisColor.b, Handles.zAxisColor.a * faceOpacity);
-                            Handles.DrawSolidRectangleWithOutline(verts, faceColor, Color.clear);
-                            EditorGUI.BeginChangeCheck();
-                            sliderFaceProjected = Handles.Slider2D(ids.xy, sliderFaceProjected, Vector3.forward, Vector3.right, Vector3.up, size2D, Handles.RectangleHandleCap, GridSnapping.active ? Vector2.zero : new Vector2(EditorSnapSettings.move[0], EditorSnapSettings.move[1]), false);
-                            if (EditorGUI.EndChangeCheck())
-                            {
-                                sliderRotatedWorldPos.x = sliderFaceProjected.x;
-                                sliderRotatedWorldPos.y = sliderFaceProjected.y;
-                            }
-                        }
-                        sliderFaceProjected.x -= size2D;
-                        sliderFaceProjected.y -= size2D;
-
-                        // 2D slider: x-axis
-                        EditorGUI.BeginChangeCheck();
-                        using (new Handles.DrawingScope(Handles.xAxisColor))
-                            sliderFaceProjected = Handles.Slider(sliderFaceProjected, Vector3.right);
-                        if (EditorGUI.EndChangeCheck())
-                            sliderRotatedWorldPos.x = sliderFaceProjected.x;
-
-                        // 2D slider: y-axis
-                        EditorGUI.BeginChangeCheck();
-                        using (new Handles.DrawingScope(Handles.yAxisColor))
-                            sliderFaceProjected = Handles.Slider(sliderFaceProjected, Vector3.up);
-                        if (EditorGUI.EndChangeCheck())
-                            sliderRotatedWorldPos.y = sliderFaceProjected.y;
-
-                        // depth: z-axis
-                        EditorGUI.BeginChangeCheck();
-                        using (new Handles.DrawingScope(Handles.zAxisColor))
-                            depthSlider = Handles.Slider(depthSlider, Vector3.forward);
-                        if (EditorGUI.EndChangeCheck())
-                            sliderRotatedWorldPos.z = depthSlider.z;
-                    }
+                    Vector3 newPosition = ProjectedTransform.DrawHandles(decalProjector.transform.position, decalProjector.offset.z, decalProjector.transform.rotation);
                     if (EditorGUI.EndChangeCheck())
                     {
-                        Vector3 newPosition = decalProjector.transform.rotation * sliderRotatedWorldPos;
+                        decalProjector.offset -= Quaternion.Inverse(decalProjector.transform.rotation) * (decalProjector.transform.position - newPosition);
                         decalProjector.transform.position = newPosition;
-                        decalProjector.offset += sliderRotatedWorldPos - beforeManipulationRotatedWorldPos;
                     }
                 }
 
                 // UV
-                //using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position + decalProjector.transform.rotation * new Vector3(-decalProjector.offset.x, -decalProjector.offset.y, -decalProjector.offset.z), decalProjector.transform.rotation, Vector3.one)))
-                using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * (new Vector3(decalProjector.size.x * 0.5f, decalProjector.size.y * 0.5f, 0) + decalProjector.offset), decalProjector.transform.rotation, Vector3.one)))
+                //using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * (new Vector3(decalProjector.size.x * 0.5f, decalProjector.size.y * 0.5f, 0) + decalProjector.offset), decalProjector.transform.rotation, Vector3.one)))
+                //Vector3 drawingSpaceOrigin = decalProjector.transform.position - decalProjector.transform.rotation * (new Vector3(decalProjector.size.x * 0.5f, decalProjector.size.y * 0.5f, 0) + decalProjector.offset);
+                //float drawingSpaceZRotated = (Quaternion.Inverse(decalProjector.transform.rotation) * decalProjector.transform.position).z + decalProjector.offset.z;
+                Vector3 drawingSpaceOriginRotated = Quaternion.Inverse(decalProjector.transform.rotation) * decalProjector.transform.position - new Vector3(decalProjector.size.x * 0.5f, decalProjector.size.y * 0.5f, 0) + decalProjector.offset;
+                using (new Handles.DrawingScope(Matrix4x4.TRS(Vector3.zero, decalProjector.transform.rotation, Vector3.one)))
                 {
-                    const float k_Limit = 100000;
-                    const float k_LimitInv = 1/k_Limit;
                     Vector2 UVSize = new Vector2(
                         decalProjector.uvScale.x > k_Limit || decalProjector.uvScale.x < -k_Limit ? 0f : decalProjector.size.x / decalProjector.uvScale.x,
                         decalProjector.uvScale.y > k_Limit || decalProjector.uvScale.y < -k_Limit ? 0f : decalProjector.size.y / decalProjector.uvScale.y
                         );
                     Vector2 UVStart = -new Vector2(decalProjector.uvBias.x * UVSize.x, decalProjector.uvBias.y * UVSize.y);
-                    Vector2 UVCenter = UVStart + UVSize * 0.5f;
+                    Vector2 UVCenter = UVStart + UVSize * 0.5f +  (Vector2)drawingSpaceOriginRotated;
+
+                    m_UVHandles.center = UVCenter;
+                    m_UVHandles.size = UVSize;
+
+                    string debugBefore = m_UVHandles.debug;
+
                     EditorGUI.BeginChangeCheck();
-                    UVSize = Handles.DoRectHandles(Quaternion.identity, UVCenter /*decalProjector.uvBias*/, UVSize, handlesOnly: true);
+                    m_UVHandles.DrawHandle();
                     if (EditorGUI.EndChangeCheck())
                     {
+                        Debug.Log($"Rect changed {debugBefore} -> {m_UVHandles.debug}");
+
                         Vector2 limit = new Vector2(Mathf.Abs(decalProjector.size.x * k_LimitInv), Mathf.Abs(decalProjector.size.y * k_LimitInv));
-                        Vector2 uvScale = decalProjector.uvScale;
+                        Debug.Log($"Limit:({limit.x},{limit.y})");
+                        Vector2 uvScale = m_UVHandles.size;
+                        Debug.Log($"local uvScale before:({uvScale.x},{uvScale.y})");
                         for (int channel = 0; channel < 2; channel++)
                         {
-                            if (Mathf.Abs(UVSize[channel]) < limit[channel])
-                                uvScale[channel] = decalProjector.size[channel] / UVSize[channel];
+                            if (Mathf.Abs(uvScale[channel]) > limit[channel])
+                                uvScale[channel] = decalProjector.size[channel] / uvScale[channel];
                             else
-                                uvScale[channel] = Mathf.Sign(decalProjector.size[channel]) * Mathf.Sign(UVSize[channel]) * k_Limit;
+                                uvScale[channel] = Mathf.Sign(decalProjector.size[channel]) * Mathf.Sign(uvScale[channel]) * k_Limit;
                         }
+                        Debug.Log($"local uvScale after:({uvScale.x},{uvScale.y})");
+
+                        Vector2 debugUvScale = decalProjector.uvScale;
+                        Vector2 debugUvBias = decalProjector.uvBias;
+
                         decalProjector.uvScale = uvScale;
+                        Debug.Log($"uvScale ({debugUvScale.x},{debugUvScale.y})->({decalProjector.uvScale.x},{decalProjector.uvScale.y})");
+                        
+                        var newUVStart = m_UVHandles.center - .5f * m_UVHandles.size - (Vector2)drawingSpaceOriginRotated;
+                        decalProjector.uvBias = -new Vector2(
+                           m_UVHandles.size.x < k_LimitInv && m_UVHandles.size.x > -k_LimitInv ? k_Limit * newUVStart.x / decalProjector.size.x : newUVStart.x / m_UVHandles.size.x,
+                           m_UVHandles.size.y < k_LimitInv && m_UVHandles.size.y > -k_LimitInv ? k_Limit * newUVStart.y / decalProjector.size.y : newUVStart.y / m_UVHandles.size.y
+                        );
+                        Debug.Log($"uvBias {D(debugUvBias)}->{D(decalProjector.uvBias)}   UVCenter:{D(UVCenter)}   UVSize:{D(UVSize)}   UVStart:{D(UVStart)}   newUVStart:{D(newUVStart)}");
                     }
                 }
             }
         }
 
-        static Handles.PositionHandleParam paramXY = new Handles.PositionHandleParam(
-            Handles.PositionHandleParam.Handle.X | Handles.PositionHandleParam.Handle.Y | Handles.PositionHandleParam.Handle.XY,
-            Vector3.zero, Vector3.one, Vector3.zero, Vector3.one * .25f,
-            Handles.PositionHandleParam.Orientation.Signed, Handles.PositionHandleParam.Orientation.Camera);
+        static string D(Vector2 a) => $"({a.x},{a.y})";
 
-        static Handles.PositionHandleParam paramZ = new Handles.PositionHandleParam(
-            Handles.PositionHandleParam.Handle.Z,
-            Vector3.zero, Vector3.one, Vector3.zero, Vector3.one * .25f,
-            Handles.PositionHandleParam.Orientation.Signed, Handles.PositionHandleParam.Orientation.Camera);
-
-        static Handles.PositionHandleIds ids = new Handles.PositionHandleIds(
-            "xAxisDecalPivot".GetHashCode(),
-            "yAxisDecalPivot".GetHashCode(),
-            "zAxisDecalPivot".GetHashCode(),
-            "xyAxisDecalPivot".GetHashCode(),
-            0, //unused: "xzAxisDecalPivot".GetHashCode(),
-            0, //unused: "yzAxisDecalPivot".GetHashCode(),
-            0  //unused: "FreeMoveDecalPivot".GetHashCode()
-        );
-
-        // If the user is currently mouse dragging then this value will be True
-        // and will disallow toggling Free Move mode on or off, or changing the octant of the planar handles.
-        static bool currentlyDragging { get { return EditorGUIUtility.hotControl != 0; } }
-
-        // While the user has Free Move mode turned on by holding 'shift' or 'V' (for Vertex Snapping),
-        // this variable will be set to True.
-        static bool s_FreeMoveMode = false;
-
-        static float[] s_DoPositionHandle_Internal_CameraViewLerp = new float[6];
-
-        static Vector3 DoPivotHandle(Vector3 position, Quaternion rotation)
-        {
-            //EditorGUI.BeginChangeCheck();
-            //Vector3 res = Handles.DoPositionHandle_Internal(ids, (Vector2)position, Quaternion.identity, paramXY);
-            //Vector3 res2 = Handles.DoPositionHandle_Internal(ids, position, Quaternion.identity, paramZ);
-            //if (EditorGUI.EndChangeCheck())
-            //{
-            //    position.x = res.x;
-            //    position.y = res.y;
-            //    position.z = res2.z;
-            //}
-            //return position;
-
-            // Calculate the camera view vector in Handle draw space
-            // this handle the case where the matrix is skewed
-            var handlePosition = Handles.matrix.MultiplyPoint3x4(position);
-            var drawToWorldMatrix = Handles.matrix * Matrix4x4.TRS(position, rotation, Vector3.one);
-            var invDrawToWorldMatrix = drawToWorldMatrix.inverse;
-            var viewVectorDrawSpace = GetCameraViewFrom(handlePosition, invDrawToWorldMatrix);
-            
-            var size = HandleUtility.GetHandleSize(position);
-
-            // Calculate per axis camera lerp
-            for (var i = 0; i < 3; ++i)
-                s_DoPositionHandle_Internal_CameraViewLerp[i] = ids[i] == GUIUtility.hotControl ? 0 : GetCameraViewLerpForWorldAxis(viewVectorDrawSpace, s_AxisVector[i]);
-            // Calculate per plane camera lerp (xy, yz, xz)
-            for (var i = 0; i < 3; ++i)
-                s_DoPositionHandle_Internal_CameraViewLerp[3 + i] = Mathf.Max(s_DoPositionHandle_Internal_CameraViewLerp[i], s_DoPositionHandle_Internal_CameraViewLerp[(i + 1) % 3]);
-            
-            var isHot = ids.Has(GUIUtility.hotControl);
-            var planeOffset = paramXY.planeOffset;
-            if (isHot)
-            {
-                //axisOffset = Vector3.zero;
-                planeOffset = Vector3.zero;
-            }
-
-            var planeSize = isHot ? paramXY.planeSize + paramXY.planeOffset : paramXY.planeSize;
-
-            int i_xy = 0;
-            if (paramXY.ShouldShow(3 + i_xy) && (!isHot || ids[3 + i_xy] == GUIUtility.hotControl))
-            {
-                var cameraLerp = isHot ? 0 : s_DoPositionHandle_Internal_CameraViewLerp[3 + i_xy];
-                if (cameraLerp <= kCameraViewThreshold)
-                {
-                    var offset = planeOffset * size;
-                    offset[s_DoPositionHandle_Internal_PrevIndex[i_xy]] = 0;
-                    var planarSize = Mathf.Max(planeSize[i_xy], planeSize[s_DoPositionHandle_Internal_NextIndex[i_xy]]);
-                    position = DoPlanarHandle(ids[3 + i_xy], i_xy, position, offset, rotation, size * planarSize, cameraLerp, viewVectorDrawSpace, paramXY.planeOrientation);
-                }
-            }
-
-            //Handles.Slider(ids[i], position, offset, dir, size * param.axisSize[i], DoPositionHandle_ArrowCap, GridSnapping.active ? 0f : EditorSnapSettings.move[i]);
-
-            return position;
-        }
-
-        // When axis is looking away from camera, fade it out along 25 -> 15 degrees range
-        static readonly float kCameraViewLerpStart1 = Mathf.Cos(Mathf.Deg2Rad * 25.0f);
-        static readonly float kCameraViewLerpEnd1 = Mathf.Cos(Mathf.Deg2Rad * 15.0f);
-        // When axis is looking towards the camera, fade it out along 170 -> 175 degrees range
-        static readonly float kCameraViewLerpStart2 = Mathf.Cos(Mathf.Deg2Rad * 170.0f);
-        static readonly float kCameraViewLerpEnd2 = Mathf.Cos(Mathf.Deg2Rad * 175.0f);
-        // Hide & disable axis if they have faded out more than 60%
-        internal const float kCameraViewThreshold = 0.6f;
-
-
-        static int[] s_DoPositionHandle_Internal_NextIndex = { 1, 2, 0 };
-        static int[] s_DoPositionHandle_Internal_PrevIndex = { 2, 0, 1 };
-
-        static Vector3[] s_AxisVector = { Vector3.right, Vector3.up, Vector3.forward };
-
-        internal static float GetCameraViewLerpForWorldAxis(Vector3 viewVector, Vector3 axis)
-        {
-            var dot = Vector3.Dot(viewVector, axis);
-            var l1 = Mathf.InverseLerp(kCameraViewLerpStart1, kCameraViewLerpEnd1, dot);
-            var l2 = Mathf.InverseLerp(kCameraViewLerpStart2, kCameraViewLerpEnd2, dot);
-            return Mathf.Max(l1, l2);
-        }
-        
-        internal static Vector3 GetCameraViewFrom(Vector3 position, Matrix4x4 matrix)
-        {
-            Camera camera = Camera.current;
-            return camera.orthographic
-                ? matrix.MultiplyVector(camera.transform.forward).normalized
-                : matrix.MultiplyVector(position - camera.transform.position).normalized;
-        }
-
-        internal static Color GetFadedAxisColor(Color col, float fade, int id)
-        {
-            // never fade out axes that are being hover-highlighted or currently interacted with
-            if (id != 0 && id == GUIUtility.hotControl || id == HandleUtility.nearestControl)
-                fade = 0;
-            col = Color.Lerp(col, Color.clear, fade);
-            return col;
-        }
-
-        internal static bool IsHovering(int controlID, Event evt)
-        {
-            return controlID == HandleUtility.nearestControl && GUIUtility.hotControl == 0 && !Tools.viewToolActive;
-        }
-
-        internal static Color ToActiveColorSpace(Color color)
-        {
-            return (QualitySettings.activeColorSpace == ColorSpace.Linear) ? color.linear : color;
-        }
-
-        static Vector3 s_PlanarHandlesOctant = Vector3.one;
-        static Vector3[] verts = { Vector3.zero, Vector3.zero, Vector3.zero, Vector3.zero };
-
-        static Vector3 DoPlanarHandle(
-            int id,
-            int planePrimaryAxis,
-            Vector3 position,
-            Vector3 offset,
-            Quaternion rotation,
-            float handleSize,
-            float cameraLerp,
-            Vector3 viewVectorDrawSpace,
-            Handles.PositionHandleParam.Orientation orientation)
-        {
-            var positionOffset = offset;
-
-            var axis1index = planePrimaryAxis;
-            var axis2index = (axis1index + 1) % 3;
-            var axisNormalIndex = (axis1index + 2) % 3;
-
-            Color prevColor = Handles.color;
-
-            bool isDisabled = !GUI.enabled;
-            Color color = isDisabled ? new Color(.5f, .5f, .5f, 0f) : Handles.zAxisColor;
-            color = GetFadedAxisColor(color, cameraLerp, id);
-
-            float faceOpacity = 0.8f;
-            if (GUIUtility.hotControl == id)
-                color = Handles.selectedColor;
-            else if (IsHovering(id, Event.current))
-                faceOpacity = 0.4f;
-            else
-                faceOpacity = 0.1f;
-
-            color = ToActiveColorSpace(color);
-            Handles.color = color;
-
-
-            // NOTE: The planar transform handles always face toward the camera so they won't
-            // obscure each other (unlike the X, Y, and Z axis handles which always face in the
-            // positive axis directions). Whenever the octant that the camera is in (relative to
-            // to the transform tool) changes, we need to move the planar transform handle
-            // positions to the correct octant.
-
-            // Comments below assume axis1 is X and axis2 is Z to make it easier to visualize things.
-
-            // Shift the planar transform handle in the positive direction by half its
-            // handleSize so that it doesn't overlap in the center of the transform gizmo,
-            // and also move the handle origin into the octant that the camera is in.
-            // Don't update the actant while dragging to avoid too much distraction.
-            if (!currentlyDragging)
-            {
-                switch (orientation)
-                {
-                    case Handles.PositionHandleParam.Orientation.Camera:
-                        // Offset the X position of the handle in negative direction if camera is in the -X octants; otherwise positive.
-                        // Test against -0.01 instead of 0 to give a little bias to the positive quadrants. This looks better in axis views.
-                        s_PlanarHandlesOctant[axis1index] = (viewVectorDrawSpace[axis1index] > 0.01f ? -1 : 1);
-                        // Likewise with the other axis.
-                        s_PlanarHandlesOctant[axis2index] = (viewVectorDrawSpace[axis2index] > 0.01f ? -1 : 1);
-                        break;
-                    case Handles.PositionHandleParam.Orientation.Signed:
-                        s_PlanarHandlesOctant[axis1index] = 1;
-                        s_PlanarHandlesOctant[axis2index] = 1;
-                        break;
-                }
-            }
-            Vector3 handleOffset = s_PlanarHandlesOctant;
-            // Zero out the offset along the normal axis.
-            handleOffset[axisNormalIndex] = 0;
-            positionOffset = rotation * Vector3.Scale(positionOffset, handleOffset);
-            // Rotate and scale the offset
-            handleOffset = rotation * (handleOffset * handleSize * 0.5f);
-
-            // Calculate 3 axes
-            Vector3 axis1 = Vector3.zero;
-            Vector3 axis2 = Vector3.zero;
-            Vector3 axisNormal = Vector3.zero;
-            axis1[axis1index] = 1;
-            axis2[axis2index] = 1;
-            axisNormal[axisNormalIndex] = 1;
-            axis1 = rotation * axis1;
-            axis2 = rotation * axis2;
-            axisNormal = rotation * axisNormal;
-
-            // Draw the "filler" color for the handle
-            verts[0] = position + positionOffset + handleOffset + (axis1 + axis2) * handleSize * 0.5f;
-            verts[1] = position + positionOffset + handleOffset + (-axis1 + axis2) * handleSize * 0.5f;
-            verts[2] = position + positionOffset + handleOffset + (-axis1 - axis2) * handleSize * 0.5f;
-            verts[3] = position + positionOffset + handleOffset + (axis1 - axis2) * handleSize * 0.5f;
-            Color faceColor = new Color(color.r, color.g, color.b, color.a * faceOpacity);
-            Handles.DrawSolidRectangleWithOutline(verts, faceColor, Color.clear);
-
-            // And then render the handle itself (this is the colored outline)
-            position = Handles.Slider2D(id,
-                position,
-                handleOffset + positionOffset,
-                axisNormal,
-                axis1, axis2,
-                handleSize * 0.5f,
-                Handles.RectangleHandleCap,
-                GridSnapping.active ? Vector2.zero : new Vector2(EditorSnapSettings.move[axis1index], EditorSnapSettings.move[axis2index]),
-                false);
-
-            Handles.color = prevColor;
-
-            return position;
-        }
-
-        //static Vector3 DoPivotHandle(Vector3 position, Quaternion rotation)
-        //{
-        //    Event evt = Event.current;
-        //    switch (evt.type)
-        //    {
-        //        case EventType.KeyDown:
-        //            // Holding 'V' turns on the FreeMove transform gizmo and enables vertex snapping.
-        //            if (evt.keyCode == KeyCode.V && !currentlyDragging)
-        //            {
-        //                s_FreeMoveMode = true;
-        //            }
-        //            break;
-
-        //        case EventType.KeyUp:
-        //            // If the user has released the 'V' key, then rendering the transform gizmo
-        //            // one last time with Free Move mode off is technically incorrect since it can
-        //            // add one additional frame of input with FreeMove enabled, but the
-        //            // implementation is a fair bit simpler this way.
-        //            // Basic idea: Leave this call above the 'if' statement.
-        //            EditorGUI.BeginChangeCheck();
-        //            Vector3 res = Handles.DoPositionHandle_Internal(ids, (Vector2)position, Quaternion.identity, paramXY);
-        //            Vector3 res2 = Handles.DoPositionHandle_Internal(ids, position, Quaternion.identity, paramZ);
-        //            if (EditorGUI.EndChangeCheck())
-        //            {
-        //                position.x = res.x;
-        //                position.y = res.y;
-        //                position.z = res2.z;
-        //            }
-        //            if (evt.keyCode == KeyCode.V && !evt.shift && !currentlyDragging)
-        //            {
-        //                s_FreeMoveMode = false;
-        //            }
-        //            return position;
-
-        //        case EventType.Layout:
-        //            if (!currentlyDragging && !Tools.vertexDragging)
-        //            {
-        //                s_FreeMoveMode = evt.shift;
-        //            }
-        //            break;
-        //    }
-
-        //    if (s_FreeMoveMode)
-        //        position = Handles.DoPositionHandle_Internal(Handles.PositionHandleIds.@default, position, rotation, Handles.PositionHandleParam.DefaultFreeMoveHandle);
-        //    else
-        //    {
-        //        EditorGUI.BeginChangeCheck();
-        //        Vector3 res = Handles.DoPositionHandle_Internal(ids, (Vector2)position, Quaternion.identity, paramXY);
-        //        Vector3 res2 = Handles.DoPositionHandle_Internal(ids, position, Quaternion.identity, paramZ);
-        //        if (EditorGUI.EndChangeCheck())
-        //        {
-        //            position.x = res.x;
-        //            position.y = res.y;
-        //            position.z = res2.z;
-        //        }
-        //    }
-        //    return position;
-        //}
-
-        static DisplacableRectHandles m_UVHandles = new DisplacableRectHandles(Color.white);
 
         [DrawGizmo(GizmoType.Selected | GizmoType.Active)]
         static void DrawGizmosSelected(DecalProjector decalProjector, GizmoType gizmoType)
@@ -763,18 +420,15 @@ namespace UnityEditor.Rendering.HighDefinition
             //draw them scale independent
             using (new Handles.DrawingScope(Color.white, Matrix4x4.TRS(decalProjector.transform.position, decalProjector.transform.rotation, Vector3.one)))
             {
-                //handle.center = Vector3.zero; //decalProjector.offset;
-                handle.center = new Vector3(
+                boxHandle.center = new Vector3(
                     -decalProjector.offset.x,
                     -decalProjector.offset.y,
                     decalProjector.size.z * .5f - decalProjector.offset.z);
-                handle.size = decalProjector.size;
+                boxHandle.size = decalProjector.size;
                 bool isVolumeEditMode = editMode == k_EditShapePreservingUV || editMode == k_EditShapeWithoutPreservingUV;
                 bool isPivotEditMode = editMode == k_EditUVAndPivot;
-                handle.DrawHull(isVolumeEditMode);
-
-                //Vector3 projectedPivot = decalProjector.offset + decalProjector.offset.z * Vector3.back;
-                //projectedPivot.z = -decalProjector.offset.z;
+                boxHandle.DrawHull(isVolumeEditMode);
+                
                 Vector3 pivot = Vector3.zero;
                 Vector3 projectedPivot = new Vector3(0, 0, -decalProjector.offset.z);
 
@@ -790,69 +444,21 @@ namespace UnityEditor.Rendering.HighDefinition
                 }
 
                 //draw UV and bolder edges
-                //using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * (new Vector3(decalProjector.size.x * 0.5f, decalProjector.size.y * 0.5f, 0) + decalProjector.offset), decalProjector.transform.rotation, Vector3.one)))
-                //{
-                //    if (isPivotEditMode)
-                //    {
-                //        Vector2 UVSizeX = new Vector2(
-                //            (decalProjector.uvScale.x > 100000 || decalProjector.uvScale.x < -100000 ? 0f : 1f / decalProjector.uvScale.x) * decalProjector.size.x,
-                //            0
-                //            );
-                //        Vector2 UVSizeY = new Vector2(
-                //            0,
-                //            (decalProjector.uvScale.y > 100000 || decalProjector.uvScale.y < -100000 ? 0f : 1f / decalProjector.uvScale.y) * decalProjector.size.y
-                //            );
-                //        Vector2 UVStart = -new Vector2(decalProjector.uvBias.x * UVSizeX.x, decalProjector.uvBias.y * UVSizeY.y);
-                //        Handles.DrawDottedLines(
-                //            new Vector3[]
-                //            {
-                //                UVStart,                        UVStart + UVSizeX,
-                //                UVStart + UVSizeX,              UVStart + UVSizeX + UVSizeY,
-                //                UVStart + UVSizeX + UVSizeY,    UVStart + UVSizeY,
-                //                UVStart + UVSizeY,              UVStart
-                //            },
-                //            k_DotLength);
-                //    }
-
-                //    Vector2 size = decalProjector.size;
-                //    Vector2 halfSize = size * .5f;
-                //    Vector2 halfSize2 = new Vector2(halfSize.x, -halfSize.y);
-                //    Handles.DrawLine(Vector2.zero,          halfSize - halfSize2, 3f);
-                //    Handles.DrawLine(halfSize - halfSize2,  size, 3f);
-                //    Handles.DrawLine(size,                  halfSize + halfSize2, 3f);
-                //    Handles.DrawLine(halfSize + halfSize2,  Vector2.zero, 3f);
-                //}
                 using (new Handles.DrawingScope(Matrix4x4.TRS(decalProjector.transform.position - decalProjector.transform.rotation * decalProjector.offset, decalProjector.transform.rotation, Vector3.one)))
                 {
-                    if (isPivotEditMode)
-                    {
-                        Vector2 UVSizeX = new Vector2(
-                            (decalProjector.uvScale.x > 100000 || decalProjector.uvScale.x < -100000 ? 0f : 1f / decalProjector.uvScale.x) * decalProjector.size.x,
-                            0
-                            );
-                        Vector2 UVSizeY = new Vector2(
-                            0,
-                            (decalProjector.uvScale.y > 100000 || decalProjector.uvScale.y < -100000 ? 0f : 1f / decalProjector.uvScale.y) * decalProjector.size.y
-                            );
-                        Vector2 UVStart = -new Vector2(decalProjector.uvBias.x * UVSizeX.x, decalProjector.uvBias.y * UVSizeY.y);
-                        Handles.DrawDottedLines(
-                            new Vector3[]
-                            {
-                                UVStart,                        UVStart + UVSizeX,
-                                UVStart + UVSizeX,              UVStart + UVSizeX + UVSizeY,
-                                UVStart + UVSizeX + UVSizeY,    UVStart + UVSizeY,
-                                UVStart + UVSizeY,              UVStart
-                            },
-                            k_DotLength);
-                    }
+                    Vector2 UVSize = new Vector2(
+                        decalProjector.uvScale.x > k_Limit || decalProjector.uvScale.x < -k_Limit ? 0f : decalProjector.size.x / decalProjector.uvScale.x,
+                        decalProjector.uvScale.y > k_Limit || decalProjector.uvScale.y < -k_Limit ? 0f : decalProjector.size.y / decalProjector.uvScale.y
+                        );
+                    Vector2 UVCenter = UVSize * .5f - new Vector2(decalProjector.uvBias.x * UVSize.x, decalProjector.uvBias.y * UVSize.y) - (Vector2)decalProjector.size * .5f;
 
-                    Vector2 size = decalProjector.size;
-                    Vector2 halfSize = size * .5f;
-                    Vector2 halfSize2 = new Vector2(halfSize.x, -halfSize.y);
-                    Handles.DrawLine(Vector2.zero, halfSize - halfSize2, 3f);
-                    Handles.DrawLine(halfSize - halfSize2, size, 3f);
-                    Handles.DrawLine(size, halfSize + halfSize2, 3f);
-                    Handles.DrawLine(halfSize + halfSize2, Vector2.zero, 3f);
+                    m_UVHandles.center = UVCenter;
+                    m_UVHandles.size = UVSize;
+                    m_UVHandles.DrawRect(dottedLine: true, screenSpaceSize: k_DotLength);
+                    
+                    m_UVHandles.center = default;
+                    m_UVHandles.size = decalProjector.size;
+                    m_UVHandles.DrawRect(dottedLine: false, sickness: 3f);
                 }
             }
         }

@@ -33,20 +33,17 @@ namespace UnityEditor.Rendering.HighDefinition
             CallingConventions.Any,
             new[] { typeof(int), typeof(Vector3), typeof(Vector3), typeof(float), typeof(Handles.CapFunction), typeof(float) },
             null);
-        static void Slider1D(int controlID, ref Vector3 handlePosition, Vector3 handleOrientation, float snapScale, Color color)
+        static void Slider1D(int controlID, ref Vector3 handlePosition, Vector3 handleOrientation, float snapScale)
         {
-            using (new Handles.DrawingScope(color))
+            handlePosition = (Vector3)k_Slider1D_Do.Invoke(null, new object[]
             {
-                handlePosition = (Vector3)k_Slider1D_Do.Invoke(null, new object[]
-                {
-                    controlID,
-                    handlePosition,
-                    handleOrientation,
-                    HandleUtility.GetHandleSize(handlePosition) * k_HandleSizeCoef,
-                    new Handles.CapFunction(Handles.DotHandleCap),
-                    snapScale
-                });
-            }
+                controlID,
+                handlePosition,
+                handleOrientation,
+                HandleUtility.GetHandleSize(handlePosition) * k_HandleSizeCoef,
+                new Handles.CapFunction(Handles.DotHandleCap),
+                snapScale
+            });
         }
 
         public DisplacableRectHandles(Color baseTint)
@@ -121,27 +118,28 @@ namespace UnityEditor.Rendering.HighDefinition
             var theChangedEdge = NamedEdge.None;
 
             EditorGUI.BeginChangeCheck();
+            using (new Handles.DrawingScope(m_MonochromeHandleColor))
+            {
+                EditorGUI.BeginChangeCheck();
+                Slider1D(m_ControlIDs[(int)NamedEdge.Left], ref leftPosition, Vector3.left, EditorSnapSettings.scale);
+                if (EditorGUI.EndChangeCheck())
+                    theChangedEdge = NamedEdge.Left;
 
-            EditorGUI.BeginChangeCheck();
-            Slider1D(m_ControlIDs[(int)NamedEdge.Left], ref leftPosition, Vector3.left, EditorSnapSettings.scale, m_MonochromeHandleColor);
-            if (EditorGUI.EndChangeCheck())
-                theChangedEdge = NamedEdge.Left;
+                EditorGUI.BeginChangeCheck();
+                Slider1D(m_ControlIDs[(int)NamedEdge.Right], ref rightPosition, Vector3.right, EditorSnapSettings.scale);
+                if (EditorGUI.EndChangeCheck())
+                    theChangedEdge = NamedEdge.Right;
 
-            EditorGUI.BeginChangeCheck();
-            Slider1D(m_ControlIDs[(int)NamedEdge.Right], ref rightPosition, Vector3.right, EditorSnapSettings.scale, m_MonochromeHandleColor);
-            if (EditorGUI.EndChangeCheck())
-                theChangedEdge = NamedEdge.Right;
+                EditorGUI.BeginChangeCheck();
+                Slider1D(m_ControlIDs[(int)NamedEdge.Top], ref topPosition, Vector3.up, EditorSnapSettings.scale);
+                if (EditorGUI.EndChangeCheck())
+                    theChangedEdge = NamedEdge.Top;
 
-            EditorGUI.BeginChangeCheck();
-            Slider1D(m_ControlIDs[(int)NamedEdge.Top], ref topPosition, Vector3.up, EditorSnapSettings.scale, m_MonochromeHandleColor);
-            if (EditorGUI.EndChangeCheck())
-                theChangedEdge = NamedEdge.Top;
-
-            EditorGUI.BeginChangeCheck();
-            Slider1D(m_ControlIDs[(int)NamedEdge.Bottom], ref bottomPosition, Vector3.down, EditorSnapSettings.scale, m_MonochromeHandleColor);
-            if (EditorGUI.EndChangeCheck())
-                theChangedEdge = NamedEdge.Bottom;
-
+                EditorGUI.BeginChangeCheck();
+                Slider1D(m_ControlIDs[(int)NamedEdge.Bottom], ref bottomPosition, Vector3.down, EditorSnapSettings.scale);
+                if (EditorGUI.EndChangeCheck())
+                    theChangedEdge = NamedEdge.Bottom;
+            }
             if (EditorGUI.EndChangeCheck())
             {
                 float delta = 0f;
@@ -268,5 +266,8 @@ namespace UnityEditor.Rendering.HighDefinition
                 }
             }
         }
+
+
+        internal string debug => $"center:({center.x},{center.y}) size:({size.x},{size.y})";
     }
 }
