@@ -38,7 +38,7 @@ namespace UnityEngine.Rendering.HighDefinition
         AnimationCurve m_ShutterCurve;
 
         // Internal state
-        int   m_OriginalCaptureFrameRate = 0;
+        float m_OriginalCaptureDeltaTime = 0;
         float m_OriginalFixedDeltaTime = 0;
 
         // Per-camera data cache
@@ -115,11 +115,12 @@ namespace UnityEngine.Rendering.HighDefinition
 
             Clear();
 
-            m_OriginalCaptureFrameRate = Time.captureFramerate;
-            Time.captureFramerate = m_OriginalCaptureFrameRate * (int)m_AccumulationSamples;  //* m_ShutterInterval
+            m_OriginalCaptureDeltaTime = Time.captureDeltaTime;
+            Time.captureDeltaTime = m_OriginalCaptureDeltaTime / m_AccumulationSamples;
 
+            // This is required for physics simulations
             m_OriginalFixedDeltaTime = Time.fixedDeltaTime;
-            Time.fixedDeltaTime = Time.captureDeltaTime * Time.timeScale;
+            Time.fixedDeltaTime = m_OriginalFixedDeltaTime / m_AccumulationSamples;
         }
 
         internal void BeginRecording(int samples, float shutterInterval, float shutterFullyOpen = 0.0f, float shutterBeginsClosing = 1.0f)
@@ -140,7 +141,7 @@ namespace UnityEngine.Rendering.HighDefinition
         internal void EndRecording()
         {
             m_IsRecording = false;
-            Time.captureFramerate = m_OriginalCaptureFrameRate;
+            Time.captureDeltaTime = m_OriginalCaptureDeltaTime;
             Time.fixedDeltaTime = m_OriginalFixedDeltaTime;
             m_ShutterCurve = null;
         }
