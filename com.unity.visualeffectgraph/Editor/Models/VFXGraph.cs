@@ -27,11 +27,8 @@ namespace UnityEditor.VFX
                 VisualEffectResource resource = VisualEffectResource.GetResourceAtPath(assetPath);
                 if (resource == null)
                     return;
-                VFXGraph graph = resource.graph as VFXGraph;
-                if (graph != null)
-                    graph.SanitizeForImport();
-                else
-                    Debug.LogError("VisualEffectGraphResource without graph");
+
+                resource.GetOrCreateGraph().SanitizeForImport();
             }
         }
 
@@ -40,11 +37,9 @@ namespace UnityEditor.VFX
             VisualEffectResource resource = VisualEffectResource.GetResourceAtPath(assetPath);
             if (resource != null)
             {
-                VFXGraph graph = resource.graph as VFXGraph;
+                VFXGraph graph = resource.GetOrCreateGraph();
                 if (graph != null)
-                    return resource.GetOrCreateGraph().GetImportDependencies();
-                else
-                    Debug.LogError("VisualEffectGraphResource without graph");
+                    return graph.GetImportDependencies();
             }
             return null;
         }
@@ -53,11 +48,11 @@ namespace UnityEditor.VFX
         {
             if (resource != null)
             {
-                VFXGraph graph = resource.graph as VFXGraph;
+                VFXGraph graph = resource.GetOrCreateGraph();
                 if (graph != null)
-                    resource.GetOrCreateGraph().CompileForImport();
-                else
-                    Debug.LogError("VisualEffectGraphResource without graph");
+                {
+                    graph.CompileForImport();
+                }
             }
         }
 
